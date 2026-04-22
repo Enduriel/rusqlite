@@ -1,5 +1,5 @@
 use bencher::{benchmark_group, benchmark_main, Bencher};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 struct BenchData {
@@ -130,6 +130,40 @@ fn bench_borrowing(b: &mut Bencher) {
     });
 }
 
+fn bench_borrowing_one_transaction(b: &mut Bencher) {
+    let mut db = init_db();
+
+    let data = create_data();
+
+    b.iter(|| {
+        let transaction = db.transaction().unwrap();
+        let mut stmt = transaction
+            .prepare_borrowing(&make_statement_sql())
+            .unwrap();
+        for insert_chunk in data.chunks(BATCH_VALUES) {
+            for (i, row) in insert_chunk.iter().enumerate() {
+                let i = i * COLS_PER_ROW + 1;
+                stmt.raw_bind_parameter_ref(i, row.name.as_str()).unwrap();
+                stmt.raw_bind_parameter_ref(i + 1, row.uuid.as_bytes())
+                    .unwrap();
+                stmt.raw_bind_parameter_ref(i + 2, row.parent.as_bytes())
+                    .unwrap();
+                stmt.raw_bind_parameter_ref(i + 3, row.some_u64 as i64)
+                    .unwrap();
+                stmt.raw_bind_parameter_ref(i + 4, row.string_a.as_str())
+                    .unwrap();
+                stmt.raw_bind_parameter_ref(i + 5, row.string_b.as_str())
+                    .unwrap();
+                stmt.raw_bind_parameter_ref(i + 6, row.string_c.as_str())
+                    .unwrap();
+            }
+            stmt.raw_execute().unwrap();
+        }
+        drop(stmt);
+        transaction.commit().unwrap();
+    });
+}
+
 fn bench_copy(b: &mut Bencher) {
     let db = init_db();
 
@@ -161,5 +195,82 @@ fn bench_copy(b: &mut Bencher) {
     });
 }
 
-benchmark_group!(borrowing_stmt_benches, bench_borrowing, bench_copy);
+fn bench_single_rows(b: &mut Bencher) {
+    let db = init_db();
+
+    let data = create_data();
+
+    b.iter(|| {
+        let mut stmt = db.prepare("INSERT INTO bench_data (name, uuid, parent, some_u64, string_a, string_b, string_c) VALUES (?, ?, ?, ?, ?, ?, ?)").unwrap();
+        for transaction_chunk in data.chunks(TRANSACTION_SIZE) {
+            let transaction = db.unchecked_transaction().unwrap();
+            for row in transaction_chunk {
+                      stmt.execute(params![&row.name, &row.uuid.as_bytes(), &row.parent.as_bytes(), row.some_u64 as i64, &row.string_a, &row.string_b, &row.string_c]).unwrap();       }
+            transaction.commit().unwrap();
+        }
+    });
+}
+
+fn bench_single_rows_one_transaction(b: &mut Bencher) {
+    let mut db = init_db();
+
+    let data = create_data();
+
+    b.iter(|| {
+		let transaction = db.transaction().unwrap();
+		{
+			let mut stmt = transaction
+				.prepare("INSERT INTO bench_data (name, uuid, parent, some_u64, string_a, string_b, string_c) VALUES (?, ?, ?, ?, ?, ?, ?)")
+				.unwrap();
+			for row in &data {
+				stmt.execute(params![
+					&row.name,
+					&row.uuid.as_bytes(),
+					&row.parent.as_bytes(),
+					row.some_u64 as i64,
+					&row.string_a,
+					&row.string_b,
+					&row.string_c
+				])
+				.unwrap();
+			}
+		}
+
+		transaction.commit().unwrap();
+	});
+}
+
+fn bench_single_rows_no_transaction(b: &mut Bencher) {
+    let db = init_db();
+
+    let data = create_data();
+
+    b.iter(|| {
+			let mut stmt = db
+				.prepare("INSERT INTO bench_data (name, uuid, parent, some_u64, string_a, string_b, string_c) VALUES (?, ?, ?, ?, ?, ?, ?)")
+				.unwrap();
+			for row in &data {
+				stmt.execute(params![
+					&row.name,
+					&row.uuid.as_bytes(),
+					&row.parent.as_bytes(),
+					row.some_u64 as i64,
+					&row.string_a,
+					&row.string_b,
+					&row.string_c
+				])
+				.unwrap();
+			}
+	});
+}
+
+benchmark_group!(
+    borrowing_stmt_benches,
+    bench_borrowing,
+    bench_borrowing_one_transaction,
+    bench_copy,
+    bench_single_rows,
+    bench_single_rows_one_transaction,
+    bench_single_rows_no_transaction
+);
 benchmark_main!(borrowing_stmt_benches);
